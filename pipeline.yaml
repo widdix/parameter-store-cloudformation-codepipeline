@@ -1,0 +1,146 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Pipeline'
+Resources:
+  CodeRepository:
+    Type: 'AWS::CodeCommit::Repository'
+    Properties:
+      RepositoryName: !Ref 'AWS::StackName'
+  ArtifactsBucket:
+    DeletionPolicy: Retain
+    Type: 'AWS::S3::Bucket'
+    Properties: {}
+  PipelineRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - 'cloudformation.amazonaws.com'
+            - 'codepipeline.amazonaws.com'
+          Action:
+          - 'sts:AssumeRole'
+      ManagedPolicyArns:
+      - 'arn:aws:iam::aws:policy/AdministratorAccess'
+  Pipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactsBucket
+      Name: !Ref 'AWS::StackName'
+      RestartExecutionOnUpdate: true
+      RoleArn: !GetAtt 'PipelineRole.Arn'
+      Stages:
+      - Name: Source
+        Actions:
+        - Name: FetchSource
+          ActionTypeId:
+            Category: Source
+            Owner: AWS
+            Provider: CodeCommit
+            Version: 1
+          Configuration:
+            RepositoryName: !GetAtt 'CodeRepository.Name'
+            BranchName: master
+            PollForSourceChanges: false # see CodeCommitPipelineTriggerRule
+          OutputArtifacts:
+          - Name: Source
+          RunOrder: 1
+      - Name: VPC
+        Actions:
+        - Name: Deploy
+          ActionTypeId:
+            Category: Deploy
+            Owner: AWS
+            Provider: CloudFormation
+            Version: 1
+          Configuration:
+            ActionMode: CREATE_UPDATE
+            Capabilities: CAPABILITY_IAM
+            RoleArn: !GetAtt 'PipelineRole.Arn'
+            StackName: !Sub '${AWS::StackName}-vpc'
+            TemplatePath: 'Source::vpc-2azs.yaml'
+            OutputFileName: 'output.json'
+          InputArtifacts:
+          - Name: Source
+          OutputArtifacts:
+          - Name: VPC
+          RunOrder: 1
+      - Name: Production
+        Actions:
+        - Name: DeployInfrastructure
+          ActionTypeId:
+            Category: Deploy
+            Owner: AWS
+            Provider: CloudFormation
+            Version: 1
+          Configuration:
+            ActionMode: CREATE_UPDATE
+            Capabilities: CAPABILITY_IAM
+            RoleArn: !GetAtt 'PipelineRole.Arn'
+            StackName: !Sub '${AWS::StackName}-infrastructure'
+            TemplatePath: 'Source::infrastructure.yaml'
+            TemplateConfiguration: 'Source::infrastructure.json'
+          InputArtifacts:
+          - Name: VPC
+          - Name: Source
+          RunOrder: 1
+  PipelineTriggerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - 'events.amazonaws.com'
+          Action:
+          - 'sts:AssumeRole'
+      Policies:
+      - PolicyName: 'codepipeline'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: 'codepipeline:StartPipelineExecution'
+            Resource: !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}'
+  CodeCommitPipelineTriggerRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+        - 'aws.codecommit'
+        'detail-type':
+        - 'CodeCommit Repository State Change'
+        resources:
+        - !GetAtt 'CodeRepository.Arn'
+        detail:
+          referenceType:
+          - branch
+          referenceName:
+          - master
+      State: ENABLED
+      Targets:
+      - Arn: !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}'
+        Id: pipeline
+        RoleArn: !GetAtt 'PipelineTriggerRole.Arn'
+  ParameterStorePipelineTriggerRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+        - 'aws.ssm'
+        'detail-type':
+        - 'Parameter Store Change'
+        resources:
+        - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/application/stage/instancetype'
+      State: ENABLED
+      Targets:
+      - Arn: !Sub 'arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}'
+        Id: pipeline
+        RoleArn: !GetAtt 'PipelineTriggerRole.Arn'

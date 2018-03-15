@@ -1,0 +1,5 @@
+{
+  "Parameters": {
+    "ParentVPCStack": {"Fn::GetParam": ["VPC", "output.json", "StackName"]}
+  }
+}

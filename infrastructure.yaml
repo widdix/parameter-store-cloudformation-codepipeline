@@ -1,0 +1,96 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Infrastructure'
+Parameters:
+  ParentVPCStack:
+    Description: 'Stack name of parent VPC stack based on vpc/vpc-*azs.yaml template.'
+    Type: String
+  InstanceType:
+    Description: 'Name of Parameter Store parameter to define the instance type.'
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/application/stage/instancetype'
+Mappings:
+  RegionMap:
+    'ap-south-1':
+      AMI: 'ami-531a4c3c'
+    'eu-west-3':
+      AMI: 'ami-8ee056f3'
+    'eu-west-2':
+      AMI: 'ami-403e2524'
+    'eu-west-1':
+      AMI: 'ami-d834aba1'
+    'ap-northeast-2':
+      AMI: 'ami-863090e8'
+    'ap-northeast-1':
+      AMI: 'ami-ceafcba8'
+    'sa-east-1':
+      AMI: 'ami-84175ae8'
+    'ca-central-1':
+      AMI: 'ami-a954d1cd'
+    'ap-southeast-1':
+      AMI: 'ami-68097514'
+    'ap-southeast-2':
+      AMI: 'ami-942dd1f6'
+    'eu-central-1':
+      AMI: 'ami-5652ce39'
+    'us-east-1':
+      AMI: 'ami-97785bed'
+    'us-east-2':
+      AMI: 'ami-f63b1193'
+    'us-west-1':
+      AMI: 'ami-824c4ee2'
+    'us-west-2':
+      AMI: 'ami-f2d3638a'
+Resources:
+  SecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: !Ref 'AWS::StackName'
+      SecurityGroupIngress:
+      - CidrIp: '0.0.0.0/0'
+        FromPort: 80
+        ToPort: 80
+        IpProtocol: tcp
+      VpcId:
+        'Fn::ImportValue': !Sub '${ParentVPCStack}-VPC'
+  VirtualMachine:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      ImageId: !FindInMap [RegionMap, !Ref 'AWS::Region', AMI]
+      InstanceType: !Ref InstanceType
+      SecurityGroupIds:
+      - !Ref SecurityGroup
+      UserData:
+        'Fn::Base64': !Sub |
+          #!/bin/bash -ex
+          trap '/opt/aws/bin/cfn-signal -e 1 --region ${AWS::Region} --stack ${AWS::StackName} --resource VirtualMachine' ERR
+
+          # run UserData on every instance start, not only on first boot
+          cat > /etc/cloud/cloud.cfg.d/15_run_every.cfg <<EOF
+          #cloud-config
+          cloud_final_modules:
+           - rightscale_userdata
+           - scripts-per-once
+           - scripts-per-boot
+           - scripts-per-instance
+           - [scripts-user, always]
+           - keys-to-console
+           - phone-home
+           - final-message
+          EOF
+
+          yum -y install httpd24
+          echo 'Running on ${InstanceType}' > /var/www/html/index.html
+          service httpd start
+          chkconfig httpd on
+          /opt/aws/bin/cfn-signal -e 0 --region ${AWS::Region} --stack ${AWS::StackName} --resource VirtualMachine
+      SubnetId:
+        'Fn::ImportValue': !Sub '${ParentVPCStack}-SubnetAPublic'
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT10M
+Outputs:
+  IPAddress:
+    Description: 'The public IP address of the EC2 instance.'
+    Value: !GetAtt 'VirtualMachine.PublicIp'
